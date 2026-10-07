@@ -8,6 +8,7 @@ An automated Discord bot that fetches daily crossword puzzles from [Cross With F
 
 - ⚙️ **Per-Server Custom Configuration**: Set notification role, channel, and daily post time directly in Discord.
 - 🗓️ **Day-of-Week Search Overrides & Skipping**: Configure search sources/offsets or **skip specific days** (e.g. skip weekends).
+- 🔒 **Permission Protected**: All configuration changes require `Manage Server` permissions.
 - 🗣️ **Natural Setup Syntax**: Configure settings with simple Discord commands.
 - 🧩 **Flexible Puzzle Search**: Supports NY Times, LA Times, WSJ, Universal, and custom crossword searches.
 - 🐳 **Docker & Docker Compose Ready**: Easily run 24/7 on a TinyPC, Raspberry Pi, or home server.
@@ -16,6 +17,9 @@ An automated Discord bot that fetches daily crossword puzzles from [Cross With F
 ---
 
 ## ⚙️ Server Configuration Commands
+
+> [!IMPORTANT]
+> All `!crossword config` modification commands require **Manage Server** (or **Administrator**) permissions in Discord. Regular server members cannot alter bot settings.
 
 ### General Setup Commands
 
@@ -43,12 +47,12 @@ You can customize which puzzle is posted on specific days or **skip posting on c
 !crossword config override wednesday search "la times" offset -4
 ```
 
-| Override Command | Description |
-| :--- | :--- |
-| `!crossword config override <day> skip` | **Skips daily posting** on the specified day (e.g. `saturday skip`). |
-| `!crossword config override <day> search "<query>" offset <offset>` | Set puzzle query & date offset for a given day. |
-| `!crossword config override <day> clear` | Remove override for a day (reverts to default NY Times). |
-| `!crossword config override list` | View all active day overrides for the server. |
+| Override Command | Description | Permission |
+| :--- | :--- | :--- |
+| `!crossword config override <day> skip` | **Skips daily posting** on the specified day (e.g. `saturday skip`). | Manage Server |
+| `!crossword config override <day> search "<query>" offset <offset>` | Set puzzle query & date offset for a given day. | Manage Server |
+| `!crossword config override <day> clear` | Remove override for a day (reverts to default NY Times). | Manage Server |
+| `!crossword config override list` | View all active day overrides for the server. | Everyone |
 
 ---
 
