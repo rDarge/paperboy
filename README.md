@@ -1,18 +1,19 @@
 # NY Times & Custom Daily Crossword Discord Bot 🧩
 
-An automated Discord bot that fetches daily crossword puzzles from [Cross With Friends](https://www.crosswithfriends.com/) at a scheduled time in **Eastern Time (ET)**, posts a play link in your Discord channel, and tags your server's crossword role.
+An automated Discord bot that fetches daily crossword puzzles from [Cross With Friends](https://www.crosswithfriends.com/) at a scheduled time in **Eastern Time (ET)**, posts a dedicated **multiplayer room play link** in your Discord channel, and tags your server's crossword role.
 
 ---
 
 ## 🌟 Features
 
+- 🎮 **Shared Multiplayer Rooms**: Automatically generates a dedicated room link (`/beta/game/<gid>`) for each post so all server members solve together in the exact same room!
 - ⚙️ **Per-Server Custom Configuration**: Set notification role, channel, and daily post time directly in Discord.
 - 🗓️ **Day-of-Week Search Overrides & Skipping**: Configure search sources/offsets or **skip specific days** (e.g. skip weekends).
 - 🔒 **Permission Protected**: All configuration changes require `Manage Server` permissions.
 - 🗣️ **Natural Setup Syntax**: Configure settings with simple Discord commands.
 - 🧩 **Flexible Puzzle Search**: Supports NY Times, LA Times, WSJ, Universal, and custom crossword searches.
 - 🐳 **Docker & Docker Compose Ready**: Easily run 24/7 on a TinyPC, Raspberry Pi, or home server.
-- 🎨 **Rich Embeds**: Displays puzzle title, author, target puzzle date, direct play link, and solve stats.
+- 🎨 **Rich Embeds**: Displays puzzle title, author, target puzzle date, multiplayer room link, and solve stats.
 
 ---
 
@@ -32,6 +33,8 @@ An automated Discord bot that fetches daily crossword puzzles from [Cross With F
 | `!crossword config reset-post` | Resets last posted status so the bot can post again today for testing. | Manage Server |
 | `!crossword config toggle` | Toggles automated daily posts ON/OFF. | Manage Server |
 | `!crossword config status` | Displays current server configuration and active day overrides. | Everyone |
+| `!check` (or `!preview`) | Previews today's multiplayer crossword embed without pinging the role. | Everyone |
+| `!crossword` (or `!today`) | Manually triggers today's multiplayer crossword post with role ping. | Everyone |
 
 ---
 
@@ -56,10 +59,21 @@ You can customize which puzzle is posted on specific days or **skip posting on c
 
 ---
 
+## 🎮 How Multiplayer Game Rooms Work
+
+When the bot posts a daily crossword or when `!crossword` / `!check` is called:
+1. The bot queries Cross With Friends API to fetch today's puzzle.
+2. It requests a new unique Game ID (`gid`) from `/api/counters/gid` and registers a room via `POST /api/game`.
+3. It posts the dedicated multiplayer room link (`https://www.crosswithfriends.com/beta/game/<gid>`).
+4. **Result**: Everyone in your Discord server who clicks the link joins the **same shared room** to play together!
+
+---
+
 ## 🐳 Running with Docker Compose (TinyPC / Server Setup)
 
 Running with Docker Compose ensures the bot runs 24/7 and automatically restarts when your TinyPC reboots:
 
+### Initial Setup & Launch
 1. **Clone the repository and set your `.env`**:
    ```bash
    cp .env.example .env
@@ -76,13 +90,24 @@ Running with Docker Compose ensures the bot runs 24/7 and automatically restarts
    docker compose logs -f
    ```
 
-4. **Stop or Restart the container**:
-   ```bash
-   docker compose down
-   docker compose restart
-   ```
+---
 
-*Note: Database data is automatically stored in `./data/guild_configs.db` on your TinyPC so settings persist across container restarts.*
+### 🔄 Rebuilding & Updating After Code Changes
+
+Whenever you modify `bot.py` or pull code updates, the Python code running inside Docker will not update until you rebuild the container image.
+
+```bash
+# Rebuild the Docker image and restart the container in one command:
+docker compose up -d --build
+
+# Or for a complete teardown and fresh rebuild:
+docker compose down
+docker compose build --no-cache
+docker compose up -d
+```
+
+> [!NOTE]
+> Rebuilding or restarting Docker will **NOT** delete your server settings! Database data is persisted in `./data/guild_configs.db` on your TinyPC disk.
 
 ---
 
