@@ -2,7 +2,8 @@ import os
 import re
 import logging
 import asyncio
-from datetime import datetime
+import urllib.parse
+from datetime import datetime, timedelta
 import zoneinfo
 import aiohttp
 import discord
@@ -27,54 +28,56 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()]
 )
 
-# CrossWithFriends API URL
-API_URL = (
-    "https://www.crosswithfriends.com/api/puzzle_list?"
-    "page=0&pageSize=50"
-    "&filter%5BnameOrTitleFilter%5D="
-    "&filter%5BsizeFilter%5D%5BMini%5D=false"
-    "&filter%5BsizeFilter%5D%5BMidi%5D=false"
-    "&filter%5BsizeFilter%5D%5BStandard%5D=true"
-    "&filter%5BsizeFilter%5D%5BLarge%5D=false"
-    "&filter%5BtypeFilter%5D%5BStandard%5D=true"
-    "&filter%5BtypeFilter%5D%5BCryptic%5D=false"
-    "&filter%5BtypeFilter%5D%5BContest%5D=true"
-    "&filter%5BdayOfWeekFilter%5D%5BMon%5D=true"
-    "&filter%5BdayOfWeekFilter%5D%5BTue%5D=true"
-    "&filter%5BdayOfWeekFilter%5D%5BWed%5D=true"
-    "&filter%5BdayOfWeekFilter%5D%5BThu%5D=true"
-    "&filter%5BdayOfWeekFilter%5D%5BFri%5D=true"
-    "&filter%5BdayOfWeekFilter%5D%5BSat%5D=true"
-    "&filter%5BdayOfWeekFilter%5D%5BSun%5D=true"
-    "&filter%5BdayOfWeekFilter%5D%5BUnknown%5D=true"
-    "&filter%5BminRating%5D=0"
-    "&filter%5BsortBy%5D=default"
-)
-
 # Timezone configuration (Eastern Time)
 ET_TZ = zoneinfo.ZoneInfo("America/New_York")
+VALID_DAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 
 # Discord Bot Setup
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Cache for today's puzzle to avoid redundant API calls
-cached_puzzle = None
-cached_puzzle_date = None
+# Cache for puzzle requests by (search_query, target_date_str)
+puzzle_cache = {}
 
 
-async def fetch_nyt_puzzle(retries=3, delay=10):
+def build_api_url(search_query: str) -> str:
+    """Builds crosswithfriends API URL with search query filter."""
+    encoded_query = urllib.parse.quote(search_query)
+    return (
+        f"https://www.crosswithfriends.com/api/puzzle_list?"
+        f"page=0&pageSize=50"
+        f"&filter%5BnameOrTitleFilter%5D={encoded_query}"
+        f"&filter%5BsizeFilter%5D%5BMini%5D=false"
+        f"&filter%5BsizeFilter%5D%5BMidi%5D=false"
+        f"&filter%5BsizeFilter%5D%5BStandard%5D=true"
+        f"&filter%5BsizeFilter%5D%5BLarge%5D=false"
+        f"&filter%5BtypeFilter%5D%5BStandard%5D=true"
+        f"&filter%5BtypeFilter%5D%5BCryptic%5D=false"
+        f"&filter%5BtypeFilter%5D%5BContest%5D=true"
+        f"&filter%5BdayOfWeekFilter%5D%5BMon%5D=true"
+        f"&filter%5BdayOfWeekFilter%5D%5BTue%5D=true"
+        f"&filter%5BdayOfWeekFilter%5D%5BWed%5D=true"
+        f"&filter%5BdayOfWeekFilter%5D%5BThu%5D=true"
+        f"&filter%5BdayOfWeekFilter%5D%5BFri%5D=true"
+        f"&filter%5BdayOfWeekFilter%5D%5BSat%5D=true"
+        f"&filter%5BdayOfWeekFilter%5D%5BSun%5D=true"
+        f"&filter%5BdayOfWeekFilter%5D%5BUnknown%5D=true"
+        f"&filter%5BminRating%5D=0"
+        f"&filter%5BsortBy%5D=default"
+    )
+
+
+async def fetch_puzzle_by_criteria(search_query: str, target_date, retries=3, delay=10):
     """
-    Fetches today's NY Times regular crossword puzzle from crosswithfriends.com API.
-    Caches result per date.
+    Fetches puzzle from API matching search_query and target_date.
+    Uses in-memory caching per search criteria.
     """
-    global cached_puzzle, cached_puzzle_date
-    today_et = datetime.now(ET_TZ).date()
+    cache_key = f"{search_query.lower()}:{target_date.strftime('%Y-%m-%d')}"
+    if cache_key in puzzle_cache:
+        return puzzle_cache[cache_key]
 
-    if cached_puzzle_date == today_et and cached_puzzle is not None:
-        return cached_puzzle
-
+    api_url = build_api_url(search_query)
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     }
@@ -82,14 +85,13 @@ async def fetch_nyt_puzzle(retries=3, delay=10):
     for attempt in range(1, retries + 1):
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(API_URL, headers=headers, timeout=15) as resp:
+                async with session.get(api_url, headers=headers, timeout=15) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         puzzles = data.get("puzzles", [])
-                        puzzle = find_today_nyt_puzzle(puzzles)
+                        puzzle = match_puzzle_by_date(puzzles, search_query, target_date)
                         if puzzle:
-                            cached_puzzle = puzzle
-                            cached_puzzle_date = today_et
+                            puzzle_cache[cache_key] = puzzle
                             return puzzle
                     else:
                         logging.warning(f"API returned status {resp.status} on attempt {attempt}")
@@ -102,67 +104,107 @@ async def fetch_nyt_puzzle(retries=3, delay=10):
     return None
 
 
-def find_today_nyt_puzzle(puzzles):
-    """Filters puzzle list for today's NY Times regular (Standard) puzzle."""
-    today_et = datetime.now(ET_TZ).date()
-    month_name = today_et.strftime("%B")
-    short_month = today_et.strftime("%b")
-    day_str = str(today_et.day)
-    year_str = str(today_et.year)
+def match_puzzle_by_date(puzzles, search_query, target_date):
+    """Filters returned puzzles for search query and target date."""
+    month_fullname = target_date.strftime("%B")  # e.g., October
+    month_short = target_date.strftime("%b")     # e.g., Oct
+    day_str = str(target_date.day)
+    year_str = str(target_date.year)
 
     date_patterns = [
-        rf"{month_name}\s+{day_str},?\s+{year_str}",
-        rf"{short_month}\.?\s+{day_str},?\s+{year_str}",
+        rf"{month_fullname}\s+{day_str},?\s+{year_str}",
+        rf"{month_short}\.?\s+{day_str},?\s+{year_str}",
+        rf"{target_date.month}/{target_date.day}/{target_date.year}",
+        rf"{target_date.month}/{target_date.day}/{str(target_date.year)[2:]}"
     ]
+
+    clean_q = search_query.strip().lower()
+    if clean_q in ["la times", "l.a. times", "l. a. times"]:
+        query_pattern = r"L\.?\s*A\.?\s*Times"
+    elif clean_q in ["ny times", "n.y. times", "new york times"]:
+        query_pattern = r"NY\s*Times|New\s*York\s*Times"
+    else:
+        query_pattern = re.escape(clean_q)
 
     for p in puzzles:
         info = p.get("content", {}).get("info", {})
         title = info.get("title", "")
         title_override = info.get("titleOverride") or ""
-        combined_title = f"{title} {title_override}"
+        combined = f"{title} {title_override}"
 
-        if not re.search(r"NY\s*Times|New\s*York\s*Times", combined_title, re.IGNORECASE):
+        if not re.search(query_pattern, combined, re.IGNORECASE):
             continue
 
         p_type = str(info.get("type", "")).lower()
-        if "mini" in p_type or "midi" in p_type or "mini" in combined_title.lower() or "midi" in combined_title.lower():
+        if "mini" in p_type or "midi" in p_type or "mini" in combined.lower() or "midi" in combined.lower():
             continue
 
         for pat in date_patterns:
-            if re.search(pat, combined_title, re.IGNORECASE):
+            if re.search(pat, combined, re.IGNORECASE):
                 return p
 
     for p in puzzles:
         info = p.get("content", {}).get("info", {})
         title = info.get("title", "")
         title_override = info.get("titleOverride") or ""
-        combined_title = f"{title} {title_override}"
+        combined = f"{title} {title_override}"
 
-        if re.search(r"NY\s*Times|New\s*York\s*Times", combined_title, re.IGNORECASE):
+        if re.search(query_pattern, combined, re.IGNORECASE):
             p_type = str(info.get("type", "")).lower()
-            if "mini" not in p_type and "midi" not in p_type and "mini" not in combined_title.lower() and "midi" not in combined_title.lower():
+            if "mini" not in p_type and "midi" not in p_type and "mini" not in combined.lower() and "midi" not in combined.lower():
                 return p
 
     return None
 
 
-def create_puzzle_embed(puzzle_data):
+async def get_puzzle_for_guild(guild_id: str):
+    """
+    Determines search query and target date for a guild based on day of week & overrides.
+    Returns (puzzle_dict, search_query, target_date).
+    If day is skipped, search_query is 'SKIP'.
+    """
+    now_et = datetime.now(ET_TZ)
+    current_day_name = now_et.strftime("%A").lower()  # e.g., 'monday'
+    today_date = now_et.date()
+
+    override = config_db.get_day_override(guild_id, current_day_name) if guild_id else None
+
+    if override:
+        query = override["search_query"]
+        if query.upper() in ["SKIP", "NONE", "OFF", "DISABLED"]:
+            return None, "SKIP", None
+        offset = override["day_offset"]
+        target_date = today_date + timedelta(days=offset)
+        search_query = query
+    else:
+        search_query = "NY Times"
+        target_date = today_date
+
+    puzzle = await fetch_puzzle_by_criteria(search_query, target_date)
+    return puzzle, search_query, target_date
+
+
+def create_puzzle_embed(puzzle_data, search_query="NY Times", target_date=None):
     """Creates a formatted Discord Embed for the puzzle."""
     pid = puzzle_data.get("pid")
     info = puzzle_data.get("content", {}).get("info", {})
-    title = info.get("title", "NY Times Daily Crossword")
+    title = info.get("title") or info.get("titleOverride") or f"{search_query} Crossword"
     author = info.get("author", "Unknown Author")
     puzzle_url = f"https://www.crosswithfriends.com/beta/puzzle/{pid}"
+
+    date_str = target_date.strftime("%A, %B %d, %Y") if target_date else ""
 
     embed = discord.Embed(
         title=f"🧩 {title}",
         url=puzzle_url,
-        description=f"Today's NY Times regular crossword puzzle is ready to play on Cross With Friends!",
+        description=f"Today's crossword ({search_query}) is ready to play on Cross With Friends!",
         color=discord.Color.blue(),
         timestamp=datetime.now(ET_TZ)
     )
 
     embed.add_field(name="✍️ Author / Editor", value=author, inline=False)
+    if date_str:
+        embed.add_field(name="📅 Target Puzzle Date", value=date_str, inline=True)
     embed.add_field(name="🔗 Play Link", value=f"[Click here to solve!]({puzzle_url})", inline=False)
 
     stats = puzzle_data.get("stats", {})
@@ -172,7 +214,7 @@ def create_puzzle_embed(puzzle_data):
         if solves is not None or rating is not None:
             embed.set_footer(text=f"Solves: {solves or 0} | Rating: {rating or 'N/A'}/5.0")
     else:
-        embed.set_footer(text="Cross With Friends • NY Times Crossword")
+        embed.set_footer(text="Cross With Friends • Daily Crossword")
 
     return embed
 
@@ -194,7 +236,7 @@ def resolve_role_mention(guild, role_id_or_name):
 
 
 def normalize_time(time_str: str) -> str:
-    """Normalizes time strings like '12:00', '12:00 PM', '9:30 AM' into 24-hour 'HH:MM' format."""
+    """Normalizes time strings into 24-hour 'HH:MM' format."""
     time_str = time_str.strip().upper()
     formats = ["%H:%M", "%I:%M %p", "%I:%M%p"]
     for fmt in formats:
@@ -208,9 +250,7 @@ def normalize_time(time_str: str) -> str:
 
 @tasks.loop(seconds=60)
 async def minute_scheduler_task():
-    """
-    Checks every minute for guilds configured for the current time in Eastern Time (ET).
-    """
+    """Checks every minute for guilds configured for the current time in ET."""
     now_et = datetime.now(ET_TZ)
     current_time_hhmm = now_et.strftime("%H:%M")
     current_date_str = now_et.strftime("%Y-%m-%d")
@@ -218,13 +258,6 @@ async def minute_scheduler_task():
     guilds_to_notify = config_db.get_guilds_to_notify(current_time_hhmm, current_date_str)
     if not guilds_to_notify:
         return
-
-    puzzle = await fetch_nyt_puzzle()
-    if not puzzle:
-        logging.error("Failed to fetch puzzle for scheduled execution.")
-        return
-
-    embed = create_puzzle_embed(puzzle)
 
     for cfg in guilds_to_notify:
         guild_id = cfg["guild_id"]
@@ -242,12 +275,24 @@ async def minute_scheduler_task():
 
         if channel:
             try:
-                role_mention = resolve_role_mention(guild, role_id)
-                content = f"Hey {role_mention}, today's NY Times Crossword is live!"
-                allowed_mentions = discord.AllowedMentions(roles=True, users=True)
-                await channel.send(content=content, embed=embed, allowed_mentions=allowed_mentions)
-                config_db.update_last_posted_date(guild_id, current_date_str)
-                logging.info(f"Posted crossword to guild '{cfg['guild_name']}' ({guild_id}) channel {channel_id}.")
+                puzzle, query, target_date = await get_puzzle_for_guild(guild_id)
+
+                # Handle day skip
+                if query == "SKIP":
+                    config_db.update_last_posted_date(guild_id, current_date_str)
+                    logging.info(f"Daily post skipped today for guild '{cfg['guild_name']}' ({guild_id}) per day override setting.")
+                    continue
+
+                if puzzle:
+                    embed = create_puzzle_embed(puzzle, query, target_date)
+                    role_mention = resolve_role_mention(guild, role_id)
+                    content = f"Hey {role_mention}, today's crossword ({query}) is live!"
+                    allowed_mentions = discord.AllowedMentions(roles=True, users=True)
+                    await channel.send(content=content, embed=embed, allowed_mentions=allowed_mentions)
+                    config_db.update_last_posted_date(guild_id, current_date_str)
+                    logging.info(f"Posted crossword to guild '{cfg['guild_name']}' ({guild_id}) channel {channel_id}.")
+                else:
+                    logging.error(f"No puzzle found for guild {guild_id} with query '{query}'.")
             except Exception as e:
                 logging.error(f"Failed to post to channel {channel_id} in guild {guild_id}: {e}")
 
@@ -259,7 +304,7 @@ async def before_minute_scheduler_task():
 
 @bot.event
 async def on_guild_join(guild):
-    """When joining a new guild, set up default config if environment variables exist."""
+    """Set up default config when joining a new guild."""
     logging.info(f"Joined new guild: {guild.name} ({guild.id})")
     default_time = f"{DEFAULT_SCHEDULE_HOUR:02d}:{DEFAULT_SCHEDULE_MINUTE:02d}"
     config_db.set_guild_config(
@@ -285,19 +330,26 @@ async def on_ready():
 
 @bot.group(name="crossword", aliases=["nyt"], invoke_without_command=True)
 async def crossword_group(ctx):
-    """Manually post today's NY Times crossword to the current channel."""
+    """Manually post today's crossword to the current channel."""
     async with ctx.typing():
-        puzzle = await fetch_nyt_puzzle()
-        if not puzzle:
-            await ctx.send("⚠️ Could not find today's NY Times regular puzzle on Cross With Friends API.")
+        guild_id = str(ctx.guild.id) if ctx.guild else None
+        puzzle, query, target_date = await get_puzzle_for_guild(guild_id)
+
+        if query == "SKIP":
+            now_day = datetime.now(ET_TZ).strftime("%A")
+            await ctx.send(f"ℹ️ Automated daily posts are set to **SKIP** on **{now_day}s** for this server.")
             return
 
-        embed = create_puzzle_embed(puzzle)
-        cfg = config_db.get_guild_config(str(ctx.guild.id)) if ctx.guild else None
+        if not puzzle:
+            await ctx.send(f"⚠️ Could not find a matching crossword for '{query}'.")
+            return
+
+        embed = create_puzzle_embed(puzzle, query, target_date)
+        cfg = config_db.get_guild_config(guild_id) if guild_id else None
         role_setting = cfg["role_id"] if cfg else DEFAULT_ROLE_ID
 
         role_mention = resolve_role_mention(ctx.guild, role_setting)
-        content = f"Hey {role_mention}, today's NY Times Crossword is live!"
+        content = f"Hey {role_mention}, today's crossword ({query}) is live!"
         allowed_mentions = discord.AllowedMentions(roles=True, users=True)
         await ctx.send(content=content, embed=embed, allowed_mentions=allowed_mentions)
 
@@ -309,13 +361,15 @@ async def config_group(ctx, *, args: str = None):
     Configures server crossword settings.
     Usage:
       !crossword config notify @role in #channel at 12:00
+      !crossword config override monday search "ny times" offset -1
+      !crossword config override saturday skip
       !crossword config status
     """
     if not args:
         await show_config_status(ctx)
         return
 
-    # Attempt natural text matching: notify <role> in <channel> at <time>
+    # Natural sentence syntax: notify <role> in <channel> at <time>
     match = re.search(
         r'notify\s+(?P<role><@&?\d+>|@?\S+)\s+in\s+(?P<channel><#\d+>|#?\S+)\s+at\s+(?P<time>\d{1,2}:\d{2}(?:\s*[AaPp][Mm])?)',
         args, re.IGNORECASE
@@ -331,7 +385,6 @@ async def config_group(ctx, *, args: str = None):
             await ctx.send("❌ Invalid time format! Please use format like `12:00` or `12:00 PM`.")
             return
 
-        # Resolve channel object
         channel_obj = None
         chan_id_match = re.search(r'\d+', chan_raw)
         if chan_id_match:
@@ -344,7 +397,6 @@ async def config_group(ctx, *, args: str = None):
             await ctx.send(f"❌ Could not find text channel `{chan_raw}` in this server.")
             return
 
-        # Resolve role object
         role_obj_id = role_raw
         role_id_match = re.search(r'\d+', role_raw)
         if role_id_match:
@@ -363,7 +415,8 @@ async def config_group(ctx, *, args: str = None):
             channel_id=str(channel_obj.id),
             role_id=role_obj_id,
             schedule_time=norm_time,
-            enabled=1
+            enabled=1,
+            reset_posted=True
         )
 
         role_display = f"<@&{role_obj_id}>" if role_obj_id.isdigit() else role_raw
@@ -372,15 +425,118 @@ async def config_group(ctx, *, args: str = None):
             f"📢 **Channel**: {channel_obj.mention}\n"
             f"🏷️ **Role**: {role_display}\n"
             f"⏰ **Scheduled Time**: `{norm_time}` ET (Eastern Time)\n"
-            f"🟢 **Daily Posts**: Enabled"
+            f"🟢 **Daily Posts**: Enabled\n"
+            f"🔄 *Last posted status reset for testing at `{norm_time}` ET.*"
         )
     else:
         await ctx.send(
             "❓ **Unrecognized config syntax.**\n"
-            "Example usage:\n"
+            "Example usages:\n"
             "`!crossword config notify @CROSSWORD in #general at 12:00`\n"
-            "Or configure individual options:\n"
-            "`!crossword config channel #channel` | `!crossword config role @role` | `!crossword config time 12:00` | `!crossword config status`"
+            "`!crossword config override monday search \"ny times\" offset -1`\n"
+            "`!crossword config override saturday skip`\n"
+            "`!crossword config status`"
+        )
+
+
+# --- DAY OVERRIDES SUBCOMMAND ---
+
+@config_group.command(name="override")
+@commands.has_permissions(manage_guild=True)
+async def config_override(ctx, *, args: str):
+    """
+    Set, skip, clear, or view day-of-week search overrides.
+    Examples:
+      !crossword config override saturday skip
+      !crossword config override monday search "ny times" offset -1
+      !crossword config override tuesday search "ny times" offset -3
+      !crossword config override monday clear
+      !crossword config override list
+    """
+    text = args.strip()
+    guild_id = str(ctx.guild.id)
+
+    # 1. List overrides
+    if text.lower() in ["list", "status", "view", "show"]:
+        overrides = config_db.get_all_day_overrides(guild_id)
+        if not overrides:
+            await ctx.send("ℹ️ No day-of-week search overrides configured for this server. (Using standard NY Times daily puzzle).")
+            return
+
+        embed = discord.Embed(
+            title=f"🗓️ Day Search Overrides - {ctx.guild.name}",
+            color=discord.Color.blue()
+        )
+        for ov in overrides:
+            day_cap = ov["day_of_week"].capitalize()
+            query = ov["search_query"]
+            if query.upper() in ["SKIP", "NONE", "OFF", "DISABLED"]:
+                embed.add_field(
+                    name=f"📌 {day_cap}",
+                    value="🚫 **Skipped** (No post on this day)",
+                    inline=False
+                )
+            else:
+                offset = ov["day_offset"]
+                offset_str = f"{offset} days" if offset != 0 else "0 (Same day)"
+                embed.add_field(
+                    name=f"📌 {day_cap}",
+                    value=f"🔍 **Search**: `{query}`\nrepr **Offset**: `{offset_str}`",
+                    inline=False
+                )
+        await ctx.send(embed=embed)
+        return
+
+    # 2. Skip day pattern: e.g. 'saturday skip' or 'sunday disabled' or 'saturday off'
+    skip_match = re.match(r'^(?P<day>' + '|'.join(VALID_DAYS) + r')\s+(?:skip|none|off|disabled)$', text, re.IGNORECASE)
+    if skip_match:
+        day_clean = skip_match.group("day").lower()
+        config_db.set_day_override(guild_id, day_clean, "SKIP", 0)
+        await ctx.send(f"🚫 **Day Override Saved!** Daily crossword posts will be **SKIPPED** on **{day_clean.capitalize()}s**.")
+        return
+
+    # 3. Clear override pattern: e.g. 'saturday clear'
+    clear_match = re.match(r'^(?P<day>' + '|'.join(VALID_DAYS) + r')\s+(?:clear|delete|remove|reset)$', text, re.IGNORECASE)
+    if clear_match:
+        day_clean = clear_match.group("day").lower()
+        deleted = config_db.delete_day_override(guild_id, day_clean)
+        if deleted:
+            await ctx.send(f"✅ Search override for **{day_clean.capitalize()}** has been removed (reverted to default NY Times).")
+        else:
+            await ctx.send(f"ℹ️ No override was configured for **{day_clean.capitalize()}**.")
+        return
+
+    # 4. Set search override pattern: <day> search "<query>" offset <offset>
+    pattern = r'^(?P<day>' + '|'.join(VALID_DAYS) + r')\s+search\s+["\'`]?(.+?)["\'`]?\s+offset\s+([-+]?\d+)$'
+    match = re.match(pattern, text, re.IGNORECASE)
+
+    if match:
+        day_raw, query_raw, offset_raw = match.group(1), match.group(2), match.group(3)
+        day_clean = day_raw.lower()
+        query_clean = query_raw.strip('"`\' ')
+        offset_val = int(offset_raw)
+
+        config_db.set_day_override(guild_id, day_clean, query_clean, offset_val)
+
+        sample_today = datetime.now(ET_TZ).date()
+        sample_target = sample_today + timedelta(days=offset_val)
+
+        await ctx.send(
+            f"✅ **Day Override Saved!**\n"
+            f"📅 **Day**: `{day_clean.capitalize()}`\n"
+            f"🔍 **Search Query**: `{query_clean}`\n"
+            f"repr **Date Offset**: `{offset_val}` day(s)\n"
+            f"💡 *Example*: If run today, it will search `{query_clean}` for date `{sample_target.strftime('%B %d, %Y')}`."
+        )
+    else:
+        await ctx.send(
+            "❌ **Invalid override command syntax.**\n"
+            "Examples:\n"
+            "`!crossword config override saturday skip`\n"
+            "`!crossword config override monday search \"ny times\" offset -1`\n"
+            "`!crossword config override tuesday search \"ny times\" offset -3`\n"
+            "`!crossword config override monday clear`\n"
+            "`!crossword config override list`"
         )
 
 
@@ -403,13 +559,21 @@ async def config_role(ctx, role: discord.Role):
 @config_group.command(name="time")
 @commands.has_permissions(manage_guild=True)
 async def config_time(ctx, time_str: str):
-    """Set daily post time in Eastern Time (ET), e.g. 12:00 or 12:00 PM."""
+    """Set daily post time in Eastern Time (ET). Resets last posted date for testing."""
     norm_time = normalize_time(time_str)
     if not norm_time:
         await ctx.send("❌ Invalid time format! Use `HH:MM` (e.g. `12:00` or `12:00 PM`).")
         return
-    config_db.set_guild_config(guild_id=str(ctx.guild.id), guild_name=ctx.guild.name, schedule_time=norm_time)
-    await ctx.send(f"✅ Daily post time set to `{norm_time}` ET (Eastern Time).")
+    config_db.set_guild_config(guild_id=str(ctx.guild.id), guild_name=ctx.guild.name, schedule_time=norm_time, reset_posted=True)
+    await ctx.send(f"✅ Daily post time set to `{norm_time}` ET (Eastern Time).\n🔄 *Last posted status reset so testing at `{norm_time}` ET will trigger!*")
+
+
+@config_group.command(name="reset-post", aliases=["resetposted", "resetpost"])
+@commands.has_permissions(manage_guild=True)
+async def config_reset_post(ctx):
+    """Reset last posted date so the bot can post again today for testing."""
+    config_db.reset_last_posted_date(str(ctx.guild.id))
+    await ctx.send("🔄 **Last posted status reset!** The bot will post again at its next scheduled run time today.")
 
 
 @config_group.command(name="toggle")
@@ -432,7 +596,8 @@ async def config_status_subcommand(ctx):
 
 async def show_config_status(ctx):
     """Helper to render server configuration status embed."""
-    cfg = config_db.get_guild_config(str(ctx.guild.id)) if ctx.guild else None
+    guild_id = str(ctx.guild.id) if ctx.guild else None
+    cfg = config_db.get_guild_config(guild_id) if guild_id else None
     if not cfg:
         await ctx.send("ℹ️ This server has not been configured yet. Use `!crossword config notify @role in #channel at 12:00` to set it up.")
         return
@@ -457,9 +622,23 @@ async def show_config_status(ctx):
     embed.add_field(name="🏷️ Role Ping", value=role_display, inline=True)
     embed.add_field(name="⏰ Scheduled Time", value=f"`{sched_time}` ET", inline=True)
     embed.add_field(name="STATUS", value=enabled_display, inline=True)
-    embed.add_field(name="📅 Last Posted Date", value=f"`{last_posted}`", inline=True)
-    embed.set_footer(text=f"Current ET Time: {now_et}")
+    embed.add_field(name="📅 Last Posted Date", value=f"`{last_posted or 'None'}`", inline=True)
 
+    overrides = config_db.get_all_day_overrides(guild_id)
+    if overrides:
+        ov_list = []
+        for o in overrides:
+            day_name = o["day_of_week"].capitalize()
+            q = o["search_query"]
+            if q.upper() in ["SKIP", "NONE", "OFF", "DISABLED"]:
+                ov_list.append(f"• **{day_name}**: 🚫 *Skipped*")
+            else:
+                ov_list.append(f"• **{day_name}**: `{q}` (Offset: `{o['day_offset']}`)")
+        embed.add_field(name="🗓️ Day Overrides", value="\n".join(ov_list), inline=False)
+    else:
+        embed.add_field(name="🗓️ Day Overrides", value="*None (Defaulting to today's NY Times)*", inline=False)
+
+    embed.set_footer(text=f"Current ET Time: {now_et}")
     await ctx.send(embed=embed)
 
 
@@ -467,12 +646,19 @@ async def show_config_status(ctx):
 async def check_crossword_command(ctx):
     """Check today's puzzle without pinging the role (dry run)."""
     async with ctx.typing():
-        puzzle = await fetch_nyt_puzzle()
-        if not puzzle:
-            await ctx.send("⚠️ Could not find today's NY Times regular puzzle.")
+        guild_id = str(ctx.guild.id) if ctx.guild else None
+        puzzle, query, target_date = await get_puzzle_for_guild(guild_id)
+
+        if query == "SKIP":
+            now_day = datetime.now(ET_TZ).strftime("%A")
+            await ctx.send(f"ℹ️ Daily posts are set to **SKIP** on **{now_day}s** for this server.")
             return
 
-        embed = create_puzzle_embed(puzzle)
+        if not puzzle:
+            await ctx.send(f"⚠️ Could not find today's puzzle matching query '{query}'.")
+            return
+
+        embed = create_puzzle_embed(puzzle, query, target_date)
         await ctx.send(content="🔍 **Preview (No Ping)**:", embed=embed)
 
 
@@ -487,7 +673,6 @@ async def status_command(ctx):
     )
 
 
-# Error handler for missing permissions
 @config_group.error
 async def config_error(ctx, error):
     if isinstance(error, commands.MissingPermissions):
