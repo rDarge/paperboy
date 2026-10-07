@@ -2,7 +2,8 @@
 .env
 *.env
 
-# SQLite database files
+# SQLite database files and persistent data
+data/
 guild_configs.db
 *.db
 *.sqlite

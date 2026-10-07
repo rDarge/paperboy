@@ -10,8 +10,8 @@ An automated Discord bot that fetches daily crossword puzzles from [Cross With F
 - 🗓️ **Day-of-Week Search Overrides & Skipping**: Configure search sources/offsets or **skip specific days** (e.g. skip weekends).
 - 🗣️ **Natural Setup Syntax**: Configure settings with simple Discord commands.
 - 🧩 **Flexible Puzzle Search**: Supports NY Times, LA Times, WSJ, Universal, and custom crossword searches.
+- 🐳 **Docker & Docker Compose Ready**: Easily run 24/7 on a TinyPC, Raspberry Pi, or home server.
 - 🎨 **Rich Embeds**: Displays puzzle title, author, target puzzle date, direct play link, and solve stats.
-- 🔒 **Permission Protected**: Configuration commands require `Manage Server` permissions.
 
 ---
 
@@ -52,23 +52,44 @@ You can customize which puzzle is posted on specific days or **skip posting on c
 
 ---
 
-## 🚀 Quick Setup Guide
+## 🐳 Running with Docker Compose (TinyPC / Server Setup)
 
-1. **Invite your Discord Bot** with scopes `bot` and permissions `Send Messages`, `Embed Links`, `Mention Everyone`.
-2. **Configure in Discord**:
-   ```discord
-   !crossword config notify @CROSSWORD in #crossword-lounge at 12:00
-   !crossword config override saturday skip
-   !crossword config override sunday skip
-   !crossword config override monday search "ny times" offset -1
-   ```
-3. **Run `bot.py`**:
+Running with Docker Compose ensures the bot runs 24/7 and automatically restarts when your TinyPC reboots:
+
+1. **Clone the repository and set your `.env`**:
    ```bash
-   pip install -r requirements.txt
-   python bot.py
+   cp .env.example .env
+   # Edit .env and set your DISCORD_TOKEN=...
    ```
 
-Configurations and day overrides are automatically saved to `guild_configs.db` (SQLite) and persist across bot restarts.
+2. **Start the bot with Docker Compose**:
+   ```bash
+   docker compose up -d
+   ```
+
+3. **Check container logs**:
+   ```bash
+   docker compose logs -f
+   ```
+
+4. **Stop or Restart the container**:
+   ```bash
+   docker compose down
+   docker compose restart
+   ```
+
+*Note: Database data is automatically stored in `./data/guild_configs.db` on your TinyPC so settings persist across container restarts.*
+
+---
+
+## 💻 Running Directly with Python
+
+If you prefer to run directly without Docker:
+
+```bash
+pip install -r requirements.txt
+python bot.py
+```
 
 ---
 
