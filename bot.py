@@ -2,6 +2,8 @@ import os
 import re
 import logging
 import asyncio
+import random
+import string
 import urllib.parse
 from datetime import datetime, timedelta
 import zoneinfo
@@ -66,6 +68,47 @@ def build_api_url(search_query: str) -> str:
         f"&filter%5BminRating%5D=0"
         f"&filter%5BsortBy%5D=default"
     )
+
+
+async def create_shared_game_room(pid: str) -> str:
+    """
+    Creates a dedicated shared multiplayer game room on Cross With Friends for puzzle pid.
+    Returns: https://www.crosswithfriends.com/beta/game/{gid}-{suffix}
+    """
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Content-Type": "application/json"
+    }
+    default_url = f"https://www.crosswithfriends.com/beta/puzzle/{pid}"
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            # Step 1: Get next GID counter
+            async with session.post("https://www.crosswithfriends.com/api/counters/gid", headers=headers, json={}) as resp:
+                if resp.status != 200:
+                    logging.warning(f"Failed to fetch GID counter (status {resp.status}). Using fallback URL.")
+                    return default_url
+                data = await resp.json()
+                gid_num = data.get("gid") or data.get("value")
+                if not gid_num:
+                    return default_url
+
+            # Step 2: Generate random 4-letter suffix
+            suffix = "".join(random.choices(string.ascii_lowercase, k=4))
+            full_gid = f"{gid_num}-{suffix}"
+
+            # Step 3: Register multiplayer game room via POST /api/game
+            payload = {"gid": full_gid, "pid": str(pid)}
+            async with session.post("https://www.crosswithfriends.com/api/game", headers=headers, json=payload) as resp:
+                if resp.status == 200:
+                    logging.info(f"Successfully initialized game room {full_gid} for puzzle {pid}.")
+                    return f"https://www.crosswithfriends.com/beta/game/{full_gid}"
+                else:
+                    logging.warning(f"Failed to register game room (status {resp.status}). Using fallback URL.")
+                    return default_url
+    except Exception as e:
+        logging.error(f"Error creating shared game room: {e}")
+        return default_url
 
 
 async def fetch_puzzle_by_criteria(search_query: str, target_date, retries=3, delay=10):
@@ -184,20 +227,20 @@ async def get_puzzle_for_guild(guild_id: str):
     return puzzle, search_query, target_date
 
 
-def create_puzzle_embed(puzzle_data, search_query="NY Times", target_date=None):
+def create_puzzle_embed(puzzle_data, search_query="NY Times", target_date=None, play_url=None):
     """Creates a formatted Discord Embed for the puzzle."""
     pid = puzzle_data.get("pid")
     info = puzzle_data.get("content", {}).get("info", {})
     title = info.get("title") or info.get("titleOverride") or f"{search_query} Crossword"
     author = info.get("author", "Unknown Author")
-    puzzle_url = f"https://www.crosswithfriends.com/beta/puzzle/{pid}"
+    puzzle_url = play_url or f"https://www.crosswithfriends.com/beta/puzzle/{pid}"
 
     date_str = target_date.strftime("%A, %B %d, %Y") if target_date else ""
 
     embed = discord.Embed(
         title=f"🧩 {title}",
         url=puzzle_url,
-        description=f"Today's crossword ({search_query}) is ready to play on Cross With Friends!",
+        description=f"Today's crossword ({search_query}) is ready to play together on Cross With Friends!",
         color=discord.Color.blue(),
         timestamp=datetime.now(ET_TZ)
     )
@@ -205,7 +248,7 @@ def create_puzzle_embed(puzzle_data, search_query="NY Times", target_date=None):
     embed.add_field(name="✍️ Author / Editor", value=author, inline=False)
     if date_str:
         embed.add_field(name="📅 Target Puzzle Date", value=date_str, inline=True)
-    embed.add_field(name="🔗 Play Link", value=f"[Click here to solve!]({puzzle_url})", inline=False)
+    embed.add_field(name="🎮 Multiplayer Room Link", value=f"[Click here to join the server game!]({puzzle_url})", inline=False)
 
     stats = puzzle_data.get("stats", {})
     if stats and isinstance(stats, dict):
@@ -277,14 +320,14 @@ async def minute_scheduler_task():
             try:
                 puzzle, query, target_date = await get_puzzle_for_guild(guild_id)
 
-                # Handle day skip
                 if query == "SKIP":
                     config_db.update_last_posted_date(guild_id, current_date_str)
                     logging.info(f"Daily post skipped today for guild '{cfg['guild_name']}' ({guild_id}) per day override setting.")
                     continue
 
                 if puzzle:
-                    embed = create_puzzle_embed(puzzle, query, target_date)
+                    play_url = await create_shared_game_room(puzzle["pid"])
+                    embed = create_puzzle_embed(puzzle, search_query=query, target_date=target_date, play_url=play_url)
                     role_mention = resolve_role_mention(guild, role_id)
                     content = f"Hey {role_mention}, today's crossword ({query}) is live!"
                     allowed_mentions = discord.AllowedMentions(roles=True, users=True)
@@ -337,14 +380,15 @@ async def crossword_group(ctx):
 
         if query == "SKIP":
             now_day = datetime.now(ET_TZ).strftime("%A")
-            await ctx.send(f"ℹ️ Automated daily posts are set to **SKIP** on **{now_day}s** for this server.")
+            await ctx.send(f"ℹ️ Daily posts are set to **SKIP** on **{now_day}s** for this server.")
             return
 
         if not puzzle:
             await ctx.send(f"⚠️ Could not find a matching crossword for '{query}'.")
             return
 
-        embed = create_puzzle_embed(puzzle, query, target_date)
+        play_url = await create_shared_game_room(puzzle["pid"])
+        embed = create_puzzle_embed(puzzle, search_query=query, target_date=target_date, play_url=play_url)
         cfg = config_db.get_guild_config(guild_id) if guild_id else None
         role_setting = cfg["role_id"] if cfg else DEFAULT_ROLE_ID
 
@@ -456,7 +500,6 @@ async def config_override(ctx, *, args: str):
     text = args.strip()
     guild_id = str(ctx.guild.id)
 
-    # 1. List overrides
     if text.lower() in ["list", "status", "view", "show"]:
         overrides = config_db.get_all_day_overrides(guild_id)
         if not overrides:
@@ -487,7 +530,6 @@ async def config_override(ctx, *, args: str):
         await ctx.send(embed=embed)
         return
 
-    # 2. Skip day pattern: e.g. 'saturday skip' or 'sunday disabled' or 'saturday off'
     skip_match = re.match(r'^(?P<day>' + '|'.join(VALID_DAYS) + r')\s+(?:skip|none|off|disabled)$', text, re.IGNORECASE)
     if skip_match:
         day_clean = skip_match.group("day").lower()
@@ -495,7 +537,6 @@ async def config_override(ctx, *, args: str):
         await ctx.send(f"🚫 **Day Override Saved!** Daily crossword posts will be **SKIPPED** on **{day_clean.capitalize()}s**.")
         return
 
-    # 3. Clear override pattern: e.g. 'saturday clear'
     clear_match = re.match(r'^(?P<day>' + '|'.join(VALID_DAYS) + r')\s+(?:clear|delete|remove|reset)$', text, re.IGNORECASE)
     if clear_match:
         day_clean = clear_match.group("day").lower()
@@ -506,7 +547,6 @@ async def config_override(ctx, *, args: str):
             await ctx.send(f"ℹ️ No override was configured for **{day_clean.capitalize()}**.")
         return
 
-    # 4. Set search override pattern: <day> search "<query>" offset <offset>
     pattern = r'^(?P<day>' + '|'.join(VALID_DAYS) + r')\s+search\s+["\'`]?(.+?)["\'`]?\s+offset\s+([-+]?\d+)$'
     match = re.match(pattern, text, re.IGNORECASE)
 
@@ -515,6 +555,14 @@ async def config_override(ctx, *, args: str):
         day_clean = day_raw.lower()
         query_clean = query_raw.strip('"`\' ')
         offset_val = int(offset_raw)
+
+        if len(query_clean) > 100:
+            await ctx.send("❌ Search query is too long (maximum 100 characters).")
+            return
+
+        if not (-365 <= offset_val <= 365):
+            await ctx.send("❌ Date offset must be between -365 and +365 days.")
+            return
 
         config_db.set_day_override(guild_id, day_clean, query_clean, offset_val)
 
@@ -658,7 +706,8 @@ async def check_crossword_command(ctx):
             await ctx.send(f"⚠️ Could not find today's puzzle matching query '{query}'.")
             return
 
-        embed = create_puzzle_embed(puzzle, query, target_date)
+        play_url = await create_shared_game_room(puzzle["pid"])
+        embed = create_puzzle_embed(puzzle, search_query=query, target_date=target_date, play_url=play_url)
         await ctx.send(content="🔍 **Preview (No Ping)**:", embed=embed)
 
 
