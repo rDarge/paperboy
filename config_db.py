@@ -3,16 +3,22 @@ import os
 import logging
 from datetime import datetime
 
+from contextlib import contextmanager
+
 DB_FILE = os.getenv("DB_PATH", "guild_configs.db")
 
 
+@contextmanager
 def get_db():
     db_dir = os.path.dirname(DB_FILE)
     if db_dir and not os.path.exists(db_dir):
         os.makedirs(db_dir, exist_ok=True)
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
-    return conn
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 def init_db():

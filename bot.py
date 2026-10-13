@@ -53,7 +53,7 @@ def build_api_url(search_query: str) -> str:
         f"&filter%5BsizeFilter%5D%5BMini%5D=false"
         f"&filter%5BsizeFilter%5D%5BMidi%5D=false"
         f"&filter%5BsizeFilter%5D%5BStandard%5D=true"
-        f"&filter%5BsizeFilter%5D%5BLarge%5D=false"
+        f"&filter%5BsizeFilter%5D%5BLarge%5D=true"
         f"&filter%5BtypeFilter%5D%5BStandard%5D=true"
         f"&filter%5BtypeFilter%5D%5BCryptic%5D=false"
         f"&filter%5BtypeFilter%5D%5BContest%5D=true"
@@ -135,7 +135,7 @@ async def fetch_puzzle_by_criteria(search_query: str, target_date, retries=3, de
                         puzzle = match_puzzle_by_date(puzzles, search_query, target_date)
                         if puzzle:
                             puzzle_cache[cache_key] = puzzle
-                            return puzzle
+                        return puzzle
                     else:
                         logging.warning(f"API returned status {resp.status} on attempt {attempt}")
         except Exception as e:
@@ -184,17 +184,6 @@ def match_puzzle_by_date(puzzles, search_query, target_date):
 
         for pat in date_patterns:
             if re.search(pat, combined, re.IGNORECASE):
-                return p
-
-    for p in puzzles:
-        info = p.get("content", {}).get("info", {})
-        title = info.get("title", "")
-        title_override = info.get("titleOverride") or ""
-        combined = f"{title} {title_override}"
-
-        if re.search(query_pattern, combined, re.IGNORECASE):
-            p_type = str(info.get("type", "")).lower()
-            if "mini" not in p_type and "midi" not in p_type and "mini" not in combined.lower() and "midi" not in combined.lower():
                 return p
 
     return None
@@ -259,6 +248,36 @@ def create_puzzle_embed(puzzle_data, search_query="NY Times", target_date=None, 
     else:
         embed.set_footer(text="Cross With Friends • Daily Crossword")
 
+    return embed
+
+
+def create_not_found_embed(search_query: str, target_date=None):
+    """Creates a formatted Discord Embed when a requested crossword cannot be found."""
+    date_str = target_date.strftime("%A, %B %d, %Y") if target_date else "today"
+    browse_url = "https://www.crosswithfriends.com/"
+    api_url = build_api_url(search_query)
+
+    embed = discord.Embed(
+        title=f"⚠️ Crossword Not Found",
+        description=(
+            f"Could not automatically find a regular **{search_query}** crossword for **{date_str}** on Cross With Friends.\n\n"
+            f"Players can search for the puzzle manually using the links below:"
+        ),
+        color=discord.Color.orange(),
+        timestamp=datetime.now(ET_TZ)
+    )
+
+    embed.add_field(name="🔎 Search Query", value=f"`{search_query}`", inline=True)
+    embed.add_field(name="📅 Target Date", value=f"`{date_str}`", inline=True)
+    embed.add_field(
+        name="🔗 Search Links",
+        value=(
+            f"• [Cross With Friends Catalog]({browse_url})\n"
+            f"• [Direct API Results]({api_url})"
+        ),
+        inline=False
+    )
+    embed.set_footer(text="Cross With Friends • Crossword Search")
     return embed
 
 
@@ -335,7 +354,14 @@ async def minute_scheduler_task():
                     config_db.update_last_posted_date(guild_id, current_date_str)
                     logging.info(f"Posted crossword to guild '{cfg['guild_name']}' ({guild_id}) channel {channel_id}.")
                 else:
-                    logging.error(f"No puzzle found for guild {guild_id} with query '{query}'.")
+                    date_display = target_date.strftime("%A, %B %d, %Y") if target_date else "today"
+                    logging.warning(f"No puzzle found for guild {guild_id} with query '{query}' for date {date_display}.")
+                    embed = create_not_found_embed(query, target_date)
+                    role_mention = resolve_role_mention(guild, role_id)
+                    content = f"⚠️ {role_mention}, could not automatically find the **{query}** crossword for **{date_display}**."
+                    allowed_mentions = discord.AllowedMentions(roles=True, users=True)
+                    await channel.send(content=content, embed=embed, allowed_mentions=allowed_mentions)
+                    config_db.update_last_posted_date(guild_id, current_date_str)
             except Exception as e:
                 logging.error(f"Failed to post to channel {channel_id} in guild {guild_id}: {e}")
 
@@ -371,7 +397,7 @@ async def on_ready():
 
 # --- COMMAND GROUP: !crossword ---
 
-@bot.group(name="crossword", aliases=["nyt"], invoke_without_command=True)
+@bot.group(name="crossword", aliases=["nyt", "today"], invoke_without_command=True)
 async def crossword_group(ctx):
     """Manually post today's crossword to the current channel."""
     async with ctx.typing():
@@ -384,7 +410,9 @@ async def crossword_group(ctx):
             return
 
         if not puzzle:
-            await ctx.send(f"⚠️ Could not find a matching crossword for '{query}'.")
+            date_display = target_date.strftime("%A, %B %d, %Y") if target_date else "today"
+            embed = create_not_found_embed(query, target_date)
+            await ctx.send(content=f"⚠️ Could not automatically find the **{query}** crossword for **{date_display}**.", embed=embed)
             return
 
         play_url = await create_shared_game_room(puzzle["pid"])
@@ -703,7 +731,9 @@ async def check_crossword_command(ctx):
             return
 
         if not puzzle:
-            await ctx.send(f"⚠️ Could not find today's puzzle matching query '{query}'.")
+            date_display = target_date.strftime("%A, %B %d, %Y") if target_date else "today"
+            embed = create_not_found_embed(query, target_date)
+            await ctx.send(content=f"🔍 **Preview (Not Found)**: Could not find **{query}** for **{date_display}**.", embed=embed)
             return
 
         play_url = await create_shared_game_room(puzzle["pid"])

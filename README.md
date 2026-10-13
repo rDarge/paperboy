@@ -122,5 +122,15 @@ python bot.py
 
 ---
 
+## 🧪 Running Tests
+
+The test suite covers database persistence, date/size puzzle matching (including 21×21 Sunday puzzles), fallback prevention, embed formatting, and live API integration:
+
+```bash
+python -m unittest discover tests
+```
+
+---
+
 ## 📜 License
 MIT License.
